@@ -13,12 +13,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import shutil
 import subprocess
 import sys
 import threading
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -88,76 +86,6 @@ def resolve_executable(user_value: str, tool_name: str, extra_candidates: Option
         f"{tool_name} wurde nicht gefunden.\n"
         f"Geprüfte Kandidaten:\n{hint}\n"
         f"Bitte den korrekten Pfad zu {tool_name} eintragen."
-    )
-
-
-def _local_tag(tag: str) -> str:
-    return tag.split("}", 1)[-1].lower()
-
-
-def load_naps2_profile_names() -> List[str]:
-    """Liest Profile aus %APPDATA%\\NAPS2\\profiles.xml (wenn vorhanden)."""
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return []
-    profiles_xml = Path(appdata) / "NAPS2" / "profiles.xml"
-    if not profiles_xml.exists():
-        return []
-
-    try:
-        tree = ET.parse(profiles_xml)
-    except ET.ParseError:
-        return []
-
-    names: List[str] = []
-    root = tree.getroot()
-    for profile in root.iter():
-        if _local_tag(profile.tag) != "profile":
-            continue
-        for child in profile:
-            child_tag = _local_tag(child.tag)
-            if child_tag in {"displayname", "name"} and child.text and child.text.strip():
-                names.append(child.text.strip())
-                break
-
-    # Reihenfolge behalten, Duplikate entfernen
-    unique: List[str] = []
-    seen = set()
-    for name in names:
-        key = name.casefold()
-        if key not in seen:
-            unique.append(name)
-            seen.add(key)
-    return unique
-
-
-def resolve_profile_name(user_profile: str, available_profiles: List[str]) -> str:
-    """Löst eingegebenen Profilnamen gegen bekannte Profile auf."""
-    value = user_profile.strip()
-    if not value:
-        raise ValueError("Profilname ist leer.")
-    if not available_profiles:
-        return value
-
-    exact = [p for p in available_profiles if p.casefold() == value.casefold()]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        # Falls mehrfach identisch (selten), den exakten Text übernehmen.
-        return value
-
-    partial = [p for p in available_profiles if value.casefold() in p.casefold()]
-    if len(partial) == 1:
-        return partial[0]
-    if len(partial) > 1:
-        choices = "\n".join(f"- {p}" for p in partial[:10])
-        raise RuntimeError(
-            "Profilname ist nicht eindeutig. Bitte einen exakten Profilnamen verwenden.\n"
-            f"Treffer:\n{choices}"
-        )
-    raise RuntimeError(
-        "Profil nicht gefunden. Bitte den exakten Profilnamen aus NAPS2 verwenden.\n"
-        f"Eingabe: {value}"
     )
 
 
@@ -387,8 +315,6 @@ def process_scan_and_sort(
     if status_cb:
         status_cb("Lade Regeln...")
     rules = load_rules(rules_file)
-    available_profiles = load_naps2_profile_names()
-    profile_resolved = resolve_profile_name(profile, available_profiles)
 
     naps2_path_resolved = resolve_executable(
         naps2_path,
@@ -413,27 +339,17 @@ def process_scan_and_sort(
     if status_cb:
         status_cb(f"NAPS2: {naps2_path_resolved}")
         status_cb(f"Tesseract: {tesseract_path_resolved}")
-        status_cb(f"Profil: {profile_resolved}")
 
     if status_cb:
         status_cb("Starte Scan...")
-    try:
-        pages = run_scan(
-            naps2_path=naps2_path_resolved,
-            profile=profile_resolved,
-            batch_dir=batch_dir,
-            image_format=image_format,
-            source=source,
-            verbose=verbose,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        if "profile is unavailable or ambiguous" in message.lower() and available_profiles:
-            profile_hint = "\n".join(f"- {p}" for p in available_profiles[:15])
-            raise RuntimeError(
-                f"{message}\nVerfügbare NAPS2-Profile (Auszug):\n{profile_hint}"
-            ) from exc
-        raise
+    pages = run_scan(
+        naps2_path=naps2_path_resolved,
+        profile=profile,
+        batch_dir=batch_dir,
+        image_format=image_format,
+        source=source,
+        verbose=verbose,
+    )
 
     if status_cb:
         status_cb(f"Scan abgeschlossen: {len(pages)} Seite(n)")
@@ -490,14 +406,12 @@ class ScanSortGUI:
         self.root.title("Scan Sort - NAPS2 + Tesseract")
         self.events: Queue[tuple[str, str]] = Queue()
         self.worker_running = False
-        self.available_profiles: List[str] = load_naps2_profile_names()
 
-        default_profile = self._pick_default_profile(self.available_profiles)
-        self.profile_var = tk.StringVar(value=default_profile)
+        self.profile_var = tk.StringVar(value="Brother")
         self.scan_root_var = tk.StringVar(value="scans")
         self.target_root_var = tk.StringVar(value="sorted")
-        self.naps2_var = tk.StringVar(value=self._default_naps2_path())
-        self.tesseract_var = tk.StringVar(value=self._default_tesseract_path())
+        self.naps2_var = tk.StringVar(value="NAPS2.Console.exe")
+        self.tesseract_var = tk.StringVar(value="tesseract.exe")
         self.lang_var = tk.StringVar(value="deu+eng")
         self.source_var = tk.StringVar(value="adf")
         self.rules_var = tk.StringVar(value="")
@@ -505,56 +419,6 @@ class ScanSortGUI:
 
         self._build_ui()
         self._poll_events()
-
-    @staticmethod
-    def _pick_default_profile(profiles: List[str]) -> str:
-        if not profiles:
-            return ""
-        for name in profiles:
-            if "brother" in name.casefold():
-                return name
-        return profiles[0]
-
-    @staticmethod
-    def _default_naps2_path() -> str:
-        try:
-            return resolve_executable(
-                "NAPS2.Console.exe",
-                "NAPS2",
-                extra_candidates=[
-                    "naps2.console",
-                    r"C:\Program Files\NAPS2\NAPS2.Console.exe",
-                    r"C:\Program Files (x86)\NAPS2\NAPS2.Console.exe",
-                ],
-            )
-        except Exception:  # noqa: BLE001
-            return "NAPS2.Console.exe"
-
-    @staticmethod
-    def _default_tesseract_path() -> str:
-        try:
-            return resolve_executable(
-                "tesseract.exe",
-                "Tesseract",
-                extra_candidates=[
-                    "tesseract",
-                    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-                    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-                ],
-            )
-        except Exception:  # noqa: BLE001
-            return "tesseract.exe"
-
-    def _refresh_profiles(self) -> None:
-        self.available_profiles = load_naps2_profile_names()
-        self.profile_combo["values"] = self.available_profiles
-        if not self.profile_var.get().strip() or self.profile_var.get().strip() not in self.available_profiles:
-            self.profile_var.set(self._pick_default_profile(self.available_profiles))
-        count = len(self.available_profiles)
-        if count:
-            self.log(f"{count} Profil(e) geladen.")
-        else:
-            self.log("Keine NAPS2-Profile gefunden. Bitte zuerst in NAPS2 ein Profil anlegen.")
 
     def _build_ui(self) -> None:
         frm = ttk.Frame(self.root, padding=12)
@@ -564,6 +428,7 @@ class ScanSortGUI:
         frm.columnconfigure(1, weight=1)
 
         fields = [
+            ("NAPS2 Profil", self.profile_var),
             ("Scan Root", self.scan_root_var),
             ("Target Root", self.target_root_var),
             ("NAPS2 Pfad", self.naps2_var),
@@ -572,38 +437,31 @@ class ScanSortGUI:
             ("Rules JSON", self.rules_var),
         ]
 
-        row = 0
-        ttk.Label(frm, text="NAPS2 Profil").grid(row=row, column=0, sticky="w", pady=2)
-        self.profile_combo = ttk.Combobox(frm, textvariable=self.profile_var, values=self.available_profiles, state="readonly")
-        self.profile_combo.grid(row=row, column=1, sticky="ew", pady=2)
-        ttk.Button(frm, text="Profile neu laden", command=self._refresh_profiles).grid(row=row, column=2, sticky="w", padx=(6, 0))
+        for r, (label, var) in enumerate(fields):
+            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Entry(frm, textvariable=var).grid(row=r, column=1, sticky="ew", pady=2)
 
-        row += 1
-        for label, var in fields:
-            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            ttk.Entry(frm, textvariable=var).grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
-            row += 1
-
+        row = len(fields)
         ttk.Label(frm, text="Quelle").grid(row=row, column=0, sticky="w", pady=2)
         src_combo = ttk.Combobox(frm, textvariable=self.source_var, values=["adf", "glasplatte"], state="readonly")
-        src_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
+        src_combo.grid(row=row, column=1, sticky="ew", pady=2)
 
         row += 1
-        ttk.Checkbutton(frm, text="Automatische Ausrichtung", variable=self.auto_orient_var).grid(row=row, column=1, columnspan=2, sticky="w")
+        ttk.Checkbutton(frm, text="Automatische Ausrichtung", variable=self.auto_orient_var).grid(row=row, column=1, sticky="w")
 
         row += 1
         self.start_btn = ttk.Button(frm, text="Scan starten", command=self.start_scan)
-        self.start_btn.grid(row=row, column=1, columnspan=2, sticky="w", pady=6)
+        self.start_btn.grid(row=row, column=1, sticky="w", pady=6)
 
         row += 1
         self.progress = ttk.Progressbar(frm, mode="indeterminate")
-        self.progress.grid(row=row, column=0, columnspan=3, sticky="ew", pady=4)
+        self.progress.grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
 
         row += 1
         ttk.Label(frm, text="Status").grid(row=row, column=0, sticky="w")
         row += 1
         self.status_text = tk.Text(frm, height=14, wrap="word")
-        self.status_text.grid(row=row, column=0, columnspan=3, sticky="nsew")
+        self.status_text.grid(row=row, column=0, columnspan=2, sticky="nsew")
         frm.rowconfigure(row, weight=1)
 
     def log(self, message: str) -> None:
