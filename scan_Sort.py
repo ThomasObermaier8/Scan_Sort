@@ -167,18 +167,19 @@ def run_scan(
     batch_dir: Path,
     image_format: str,
     source: str,
+    driver: str,
+    device: str,
     verbose: bool,
 ) -> List[Path]:
     output_pattern = batch_dir / f"scan_%04d.{image_format}"
 
-    cmd = [
-        naps2_path,
-        "scan",
-        "--profile",
-        profile,
-        "--output",
-        str(output_pattern),
-    ]
+    cmd = [naps2_path, "scan", "--output", str(output_pattern)]
+    if profile.strip():
+        cmd.extend(["--profile", profile.strip()])
+    else:
+        cmd.extend(["--driver", driver.strip()])
+        if device.strip():
+            cmd.extend(["--device", device.strip()])
 
     # Je nach NAPS2-Version kann --source variieren. Diese Werte funktionieren bei
     # vielen Setups; falls nicht, bitte im Profil selbst hinterlegen.
@@ -376,6 +377,8 @@ def write_report(batch_dir: Path, results: List[PageResult]) -> Path:
 
 def process_scan_and_sort(
     profile: str,
+    driver: str,
+    device: str,
     scan_root: Path,
     target_root: Path,
     naps2_path: str,
@@ -397,7 +400,9 @@ def process_scan_and_sort(
         status_cb("Lade Regeln...")
     rules = load_rules(rules_file)
     available_profiles = load_naps2_profile_names()
-    profile_resolved = resolve_profile_name(profile, available_profiles)
+    profile_resolved = ""
+    if profile.strip():
+        profile_resolved = resolve_profile_name(profile, available_profiles)
 
     naps2_path_resolved = resolve_executable(
         naps2_path,
@@ -422,7 +427,11 @@ def process_scan_and_sort(
     if status_cb:
         status_cb(f"NAPS2: {naps2_path_resolved}")
         status_cb(f"Tesseract: {tesseract_path_resolved}")
-        status_cb(f"Profil: {profile_resolved}")
+        if profile_resolved:
+            status_cb(f"Profil: {profile_resolved}")
+        else:
+            status_cb(f"Treiber: {driver}")
+            status_cb(f"Gerät: {device or '(Standardgerät)'}")
 
     if status_cb:
         status_cb("Starte Scan...")
@@ -433,6 +442,8 @@ def process_scan_and_sort(
             batch_dir=batch_dir,
             image_format=image_format,
             source=source,
+            driver=driver,
+            device=device,
             verbose=verbose,
         )
     except RuntimeError as exc:
@@ -476,7 +487,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scan + OCR + automatische Ordner-Sortierung (mit GUI)")
 
     parser.add_argument("--gui", action="store_true", help="GUI starten (Standard, wenn kein --profile gesetzt ist)")
-    parser.add_argument("--profile", help="NAPS2-Profilname für den Scanner")
+    parser.add_argument("--profile", default="", help="NAPS2-Profilname für den Scanner (optional)")
+    parser.add_argument("--driver", default="escl", help="NAPS2 Treiber, z. B. escl, wia, twain, sane")
+    parser.add_argument("--device", default="", help="Scanner-Gerätename (optional, für treiberbasierten Scan)")
     parser.add_argument("--scan-root", default="scans", help="Basisordner für Rohscans")
     parser.add_argument("--target-root", default="sorted", help="Basisordner für sortierte Dateien")
     parser.add_argument("--naps2-path", default="NAPS2.Console.exe", help="Pfad zu NAPS2 Console")
@@ -503,6 +516,8 @@ class ScanSortGUI:
 
         default_profile = self._pick_default_profile(self.available_profiles)
         self.profile_var = tk.StringVar(value=default_profile)
+        self.driver_var = tk.StringVar(value="escl")
+        self.device_var = tk.StringVar(value="")
         self.scan_root_var = tk.StringVar(value="scans")
         self.target_root_var = tk.StringVar(value="sorted")
         self.naps2_var = tk.StringVar(value=self._default_naps2_path())
@@ -573,6 +588,8 @@ class ScanSortGUI:
         frm.columnconfigure(1, weight=1)
 
         fields = [
+            ("Treiber", self.driver_var),
+            ("Gerät", self.device_var),
             ("Scan Root", self.scan_root_var),
             ("Target Root", self.target_root_var),
             ("NAPS2 Pfad", self.naps2_var),
@@ -646,8 +663,8 @@ class ScanSortGUI:
     def start_scan(self) -> None:
         if self.worker_running:
             return
-        if not self.profile_var.get().strip():
-            self.log("Fehler: Bitte ein NAPS2-Profil eintragen.")
+        if not self.profile_var.get().strip() and not self.driver_var.get().strip():
+            self.log("Fehler: Bitte Profil oder Treiber eintragen.")
             return
 
         self.worker_running = True
@@ -660,6 +677,8 @@ class ScanSortGUI:
                 rules_file = Path(self.rules_var.get()) if self.rules_var.get().strip() else None
                 results, report = process_scan_and_sort(
                     profile=self.profile_var.get().strip(),
+                    driver=self.driver_var.get().strip(),
+                    device=self.device_var.get().strip(),
                     scan_root=Path(self.scan_root_var.get().strip()),
                     target_root=Path(self.target_root_var.get().strip()),
                     naps2_path=self.naps2_var.get().strip(),
@@ -696,13 +715,15 @@ def run_gui() -> int:
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    if not args.profile:
-        print("Für CLI muss --profile gesetzt sein oder --gui genutzt werden.", file=sys.stderr)
+    if not args.profile and not args.driver:
+        print("Für CLI muss --profile oder --driver gesetzt sein (oder --gui nutzen).", file=sys.stderr)
         return 1
 
     try:
         results, report = process_scan_and_sort(
             profile=args.profile,
+            driver=args.driver,
+            device=args.device,
             scan_root=Path(args.scan_root),
             target_root=Path(args.target_root),
             naps2_path=args.naps2_path,
@@ -726,7 +747,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    if args.gui or not args.profile:
+    if args.gui or len(sys.argv) == 1:
         return run_gui()
     return run_cli(args)
 
