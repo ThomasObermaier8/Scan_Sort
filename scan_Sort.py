@@ -13,12 +13,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import shutil
 import subprocess
 import sys
 import threading
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -88,76 +86,6 @@ def resolve_executable(user_value: str, tool_name: str, extra_candidates: Option
         f"{tool_name} wurde nicht gefunden.\n"
         f"Geprüfte Kandidaten:\n{hint}\n"
         f"Bitte den korrekten Pfad zu {tool_name} eintragen."
-    )
-
-
-def _local_tag(tag: str) -> str:
-    return tag.split("}", 1)[-1].lower()
-
-
-def load_naps2_profile_names() -> List[str]:
-    """Liest Profile aus %APPDATA%\\NAPS2\\profiles.xml (wenn vorhanden)."""
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return []
-    profiles_xml = Path(appdata) / "NAPS2" / "profiles.xml"
-    if not profiles_xml.exists():
-        return []
-
-    try:
-        tree = ET.parse(profiles_xml)
-    except ET.ParseError:
-        return []
-
-    names: List[str] = []
-    root = tree.getroot()
-    for profile in root.iter():
-        if _local_tag(profile.tag) != "profile":
-            continue
-        for child in profile:
-            child_tag = _local_tag(child.tag)
-            if child_tag in {"displayname", "name"} and child.text and child.text.strip():
-                names.append(child.text.strip())
-                break
-
-    # Reihenfolge behalten, Duplikate entfernen
-    unique: List[str] = []
-    seen = set()
-    for name in names:
-        key = name.casefold()
-        if key not in seen:
-            unique.append(name)
-            seen.add(key)
-    return unique
-
-
-def resolve_profile_name(user_profile: str, available_profiles: List[str]) -> str:
-    """Löst eingegebenen Profilnamen gegen bekannte Profile auf."""
-    value = user_profile.strip()
-    if not value:
-        raise ValueError("Profilname ist leer.")
-    if not available_profiles:
-        return value
-
-    exact = [p for p in available_profiles if p.casefold() == value.casefold()]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        # Falls mehrfach identisch (selten), den exakten Text übernehmen.
-        return value
-
-    partial = [p for p in available_profiles if value.casefold() in p.casefold()]
-    if len(partial) == 1:
-        return partial[0]
-    if len(partial) > 1:
-        choices = "\n".join(f"- {p}" for p in partial[:10])
-        raise RuntimeError(
-            "Profilname ist nicht eindeutig. Bitte einen exakten Profilnamen verwenden.\n"
-            f"Treffer:\n{choices}"
-        )
-    raise RuntimeError(
-        "Profil nicht gefunden. Bitte den exakten Profilnamen aus NAPS2 verwenden.\n"
-        f"Eingabe: {value}"
     )
 
 
@@ -387,8 +315,6 @@ def process_scan_and_sort(
     if status_cb:
         status_cb("Lade Regeln...")
     rules = load_rules(rules_file)
-    available_profiles = load_naps2_profile_names()
-    profile_resolved = resolve_profile_name(profile, available_profiles)
 
     naps2_path_resolved = resolve_executable(
         naps2_path,
@@ -413,27 +339,17 @@ def process_scan_and_sort(
     if status_cb:
         status_cb(f"NAPS2: {naps2_path_resolved}")
         status_cb(f"Tesseract: {tesseract_path_resolved}")
-        status_cb(f"Profil: {profile_resolved}")
 
     if status_cb:
         status_cb("Starte Scan...")
-    try:
-        pages = run_scan(
-            naps2_path=naps2_path_resolved,
-            profile=profile_resolved,
-            batch_dir=batch_dir,
-            image_format=image_format,
-            source=source,
-            verbose=verbose,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        if "profile is unavailable or ambiguous" in message.lower() and available_profiles:
-            profile_hint = "\n".join(f"- {p}" for p in available_profiles[:15])
-            raise RuntimeError(
-                f"{message}\nVerfügbare NAPS2-Profile (Auszug):\n{profile_hint}"
-            ) from exc
-        raise
+    pages = run_scan(
+        naps2_path=naps2_path_resolved,
+        profile=profile,
+        batch_dir=batch_dir,
+        image_format=image_format,
+        source=source,
+        verbose=verbose,
+    )
 
     if status_cb:
         status_cb(f"Scan abgeschlossen: {len(pages)} Seite(n)")
