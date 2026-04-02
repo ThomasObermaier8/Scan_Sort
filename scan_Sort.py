@@ -56,7 +56,37 @@ class PageResult:
 def run_command(cmd: List[str], verbose: bool = False) -> subprocess.CompletedProcess:
     if verbose:
         print("[CMD]", " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        binary = cmd[0] if cmd else "<unbekannt>"
+        raise RuntimeError(
+            f"Programm nicht gefunden: '{binary}'. "
+            "Bitte vollständigen Pfad in der GUI/CLI eintragen."
+        ) from exc
+
+
+def resolve_executable(user_value: str, tool_name: str, extra_candidates: Optional[List[str]] = None) -> str:
+    """Löst einen Executable-Namen/Pfad robust auf (inkl. gängiger Windows-Pfade)."""
+    value = user_value.strip()
+    candidates: List[str] = [value] if value else []
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+
+    for cand in candidates:
+        cand_path = Path(cand)
+        if cand_path.exists():
+            return str(cand_path)
+        resolved = shutil.which(cand)
+        if resolved:
+            return resolved
+
+    hint = "\n".join(f"- {c}" for c in candidates if c)
+    raise RuntimeError(
+        f"{tool_name} wurde nicht gefunden.\n"
+        f"Geprüfte Kandidaten:\n{hint}\n"
+        f"Bitte den korrekten Pfad zu {tool_name} eintragen."
+    )
 
 
 def run_scan(
@@ -84,13 +114,23 @@ def run_scan(
         "adf": "feeder",
         "glasplatte": "glass",
     }
-    cmd.extend(["--source", source_map[source]])
+    if source not in source_map:
+        raise ValueError(f"Ungültige Quelle: {source}. Erlaubt sind: {', '.join(source_map)}")
+    cmd_with_source = cmd + ["--source", source_map[source]]
 
-    proc = run_command(cmd, verbose=verbose)
+    proc = run_command(cmd_with_source, verbose=verbose)
+    if proc.returncode != 0:
+        stderr_lower = proc.stderr.lower()
+        unknown_source_flag = ("--source" in proc.stderr) or ("unrecognized option" in stderr_lower)
+        if unknown_source_flag:
+            # Fallback für ältere/abweichende NAPS2-Versionen ohne --source-Flag.
+            proc = run_command(cmd, verbose=verbose)
+
     if proc.returncode != 0:
         raise RuntimeError(
             "NAPS2-Scan fehlgeschlagen.\n"
             f"Returncode: {proc.returncode}\n"
+            f"Kommando: {' '.join(cmd_with_source)}\n"
             f"STDOUT: {proc.stdout.strip()}\n"
             f"STDERR: {proc.stderr.strip()}"
         )
@@ -155,6 +195,8 @@ def ocr_page(tesseract_path: str, image_path: Path, lang: str, verbose: bool) ->
 def load_rules(rules_file: Path | None) -> Dict[str, List[str]]:
     if not rules_file:
         return DEFAULT_RULES
+    if not rules_file.exists():
+        raise ValueError(f"Regeldatei nicht gefunden: {rules_file}")
 
     with rules_file.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -274,10 +316,34 @@ def process_scan_and_sort(
         status_cb("Lade Regeln...")
     rules = load_rules(rules_file)
 
+    naps2_path_resolved = resolve_executable(
+        naps2_path,
+        "NAPS2",
+        extra_candidates=[
+            "NAPS2.Console.exe",
+            "naps2.console",
+            r"C:\Program Files\NAPS2\NAPS2.Console.exe",
+            r"C:\Program Files (x86)\NAPS2\NAPS2.Console.exe",
+        ],
+    )
+    tesseract_path_resolved = resolve_executable(
+        tesseract_path,
+        "Tesseract",
+        extra_candidates=[
+            "tesseract.exe",
+            "tesseract",
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ],
+    )
+    if status_cb:
+        status_cb(f"NAPS2: {naps2_path_resolved}")
+        status_cb(f"Tesseract: {tesseract_path_resolved}")
+
     if status_cb:
         status_cb("Starte Scan...")
     pages = run_scan(
-        naps2_path=naps2_path,
+        naps2_path=naps2_path_resolved,
         profile=profile,
         batch_dir=batch_dir,
         image_format=image_format,
@@ -291,12 +357,17 @@ def process_scan_and_sort(
     if auto_orient:
         if status_cb:
             status_cb("Starte automatische Ausrichtung...")
-        auto_orient_pages(pages=pages, tesseract_path=tesseract_path, verbose=verbose, status_cb=status_cb)
+        auto_orient_pages(
+            pages=pages,
+            tesseract_path=tesseract_path_resolved,
+            verbose=verbose,
+            status_cb=status_cb,
+        )
 
     results = sort_pages(
         pages=pages,
         target_root=target_root,
-        tesseract_path=tesseract_path,
+        tesseract_path=tesseract_path_resolved,
         lang=lang,
         rules=rules,
         default_category=default_category,
@@ -315,14 +386,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", help="NAPS2-Profilname für den Scanner")
     parser.add_argument("--scan-root", default="scans", help="Basisordner für Rohscans")
     parser.add_argument("--target-root", default="sorted", help="Basisordner für sortierte Dateien")
-    parser.add_argument("--naps2-path", default="naps2.console", help="Pfad zu NAPS2 Console")
-    parser.add_argument("--tesseract-path", default="tesseract", help="Pfad zu Tesseract")
+    parser.add_argument("--naps2-path", default="NAPS2.Console.exe", help="Pfad zu NAPS2 Console")
+    parser.add_argument("--tesseract-path", default="tesseract.exe", help="Pfad zu Tesseract")
     parser.add_argument("--lang", default="deu+eng", help="OCR-Sprache(n), z. B. deu+eng")
     parser.add_argument("--image-format", default="png", choices=["png", "jpg", "tif", "tiff"])
     parser.add_argument("--rules-file", type=Path, help="JSON-Datei mit eigenen Regeln")
     parser.add_argument("--default-category", default="Unsortiert")
     parser.add_argument("--source", default="adf", choices=["adf", "glasplatte"], help="Einzug oder Glasplatte")
-    parser.add_argument("--auto-orient", action="store_true", help="Automatische Ausrichtung aktivieren")
+    parser.add_argument("--auto-orient", action="store_true", default=True, help="Automatische Ausrichtung aktivieren")
+    parser.add_argument("--no-auto-orient", action="store_false", dest="auto_orient", help="Automatische Ausrichtung deaktivieren")
     parser.add_argument("--verbose", action="store_true")
 
     return parser.parse_args()
@@ -338,8 +410,8 @@ class ScanSortGUI:
         self.profile_var = tk.StringVar(value="Brother")
         self.scan_root_var = tk.StringVar(value="scans")
         self.target_root_var = tk.StringVar(value="sorted")
-        self.naps2_var = tk.StringVar(value="naps2.console")
-        self.tesseract_var = tk.StringVar(value="tesseract")
+        self.naps2_var = tk.StringVar(value="NAPS2.Console.exe")
+        self.tesseract_var = tk.StringVar(value="tesseract.exe")
         self.lang_var = tk.StringVar(value="deu+eng")
         self.source_var = tk.StringVar(value="adf")
         self.rules_var = tk.StringVar(value="")
@@ -423,6 +495,9 @@ class ScanSortGUI:
     def start_scan(self) -> None:
         if self.worker_running:
             return
+        if not self.profile_var.get().strip():
+            self.log("Fehler: Bitte ein NAPS2-Profil eintragen.")
+            return
 
         self.worker_running = True
         self.start_btn.config(state="disabled")
@@ -458,11 +533,15 @@ def run_gui() -> int:
     if tk is None or ttk is None:
         print("Tkinter ist nicht verfügbar. Bitte per CLI mit --profile nutzen.", file=sys.stderr)
         return 1
-    root = tk.Tk()
-    app = ScanSortGUI(root)
-    _ = app
-    root.mainloop()
-    return 0
+    try:
+        root = tk.Tk()
+        app = ScanSortGUI(root)
+        _ = app
+        root.mainloop()
+        return 0
+    except tk.TclError as exc:
+        print(f"GUI konnte nicht gestartet werden: {exc}", file=sys.stderr)
+        return 1
 
 
 def run_cli(args: argparse.Namespace) -> int:
