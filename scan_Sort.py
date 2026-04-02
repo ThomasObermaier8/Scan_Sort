@@ -56,37 +56,7 @@ class PageResult:
 def run_command(cmd: List[str], verbose: bool = False) -> subprocess.CompletedProcess:
     if verbose:
         print("[CMD]", " ".join(cmd))
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError as exc:
-        binary = cmd[0] if cmd else "<unbekannt>"
-        raise RuntimeError(
-            f"Programm nicht gefunden: '{binary}'. "
-            "Bitte vollständigen Pfad in der GUI/CLI eintragen."
-        ) from exc
-
-
-def resolve_executable(user_value: str, tool_name: str, extra_candidates: Optional[List[str]] = None) -> str:
-    """Löst einen Executable-Namen/Pfad robust auf (inkl. gängiger Windows-Pfade)."""
-    value = user_value.strip()
-    candidates: List[str] = [value] if value else []
-    if extra_candidates:
-        candidates.extend(extra_candidates)
-
-    for cand in candidates:
-        cand_path = Path(cand)
-        if cand_path.exists():
-            return str(cand_path)
-        resolved = shutil.which(cand)
-        if resolved:
-            return resolved
-
-    hint = "\n".join(f"- {c}" for c in candidates if c)
-    raise RuntimeError(
-        f"{tool_name} wurde nicht gefunden.\n"
-        f"Geprüfte Kandidaten:\n{hint}\n"
-        f"Bitte den korrekten Pfad zu {tool_name} eintragen."
-    )
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 def run_scan(
@@ -304,34 +274,10 @@ def process_scan_and_sort(
         status_cb("Lade Regeln...")
     rules = load_rules(rules_file)
 
-    naps2_path_resolved = resolve_executable(
-        naps2_path,
-        "NAPS2",
-        extra_candidates=[
-            "NAPS2.Console.exe",
-            "naps2.console",
-            r"C:\Program Files\NAPS2\NAPS2.Console.exe",
-            r"C:\Program Files (x86)\NAPS2\NAPS2.Console.exe",
-        ],
-    )
-    tesseract_path_resolved = resolve_executable(
-        tesseract_path,
-        "Tesseract",
-        extra_candidates=[
-            "tesseract.exe",
-            "tesseract",
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ],
-    )
-    if status_cb:
-        status_cb(f"NAPS2: {naps2_path_resolved}")
-        status_cb(f"Tesseract: {tesseract_path_resolved}")
-
     if status_cb:
         status_cb("Starte Scan...")
     pages = run_scan(
-        naps2_path=naps2_path_resolved,
+        naps2_path=naps2_path,
         profile=profile,
         batch_dir=batch_dir,
         image_format=image_format,
@@ -345,17 +291,12 @@ def process_scan_and_sort(
     if auto_orient:
         if status_cb:
             status_cb("Starte automatische Ausrichtung...")
-        auto_orient_pages(
-            pages=pages,
-            tesseract_path=tesseract_path_resolved,
-            verbose=verbose,
-            status_cb=status_cb,
-        )
+        auto_orient_pages(pages=pages, tesseract_path=tesseract_path, verbose=verbose, status_cb=status_cb)
 
     results = sort_pages(
         pages=pages,
         target_root=target_root,
-        tesseract_path=tesseract_path_resolved,
+        tesseract_path=tesseract_path,
         lang=lang,
         rules=rules,
         default_category=default_category,
@@ -374,8 +315,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", help="NAPS2-Profilname für den Scanner")
     parser.add_argument("--scan-root", default="scans", help="Basisordner für Rohscans")
     parser.add_argument("--target-root", default="sorted", help="Basisordner für sortierte Dateien")
-    parser.add_argument("--naps2-path", default="NAPS2.Console.exe", help="Pfad zu NAPS2 Console")
-    parser.add_argument("--tesseract-path", default="tesseract.exe", help="Pfad zu Tesseract")
+    parser.add_argument("--naps2-path", default="naps2.console", help="Pfad zu NAPS2 Console")
+    parser.add_argument("--tesseract-path", default="tesseract", help="Pfad zu Tesseract")
     parser.add_argument("--lang", default="deu+eng", help="OCR-Sprache(n), z. B. deu+eng")
     parser.add_argument("--image-format", default="png", choices=["png", "jpg", "tif", "tiff"])
     parser.add_argument("--rules-file", type=Path, help="JSON-Datei mit eigenen Regeln")
@@ -397,8 +338,8 @@ class ScanSortGUI:
         self.profile_var = tk.StringVar(value="Brother")
         self.scan_root_var = tk.StringVar(value="scans")
         self.target_root_var = tk.StringVar(value="sorted")
-        self.naps2_var = tk.StringVar(value="NAPS2.Console.exe")
-        self.tesseract_var = tk.StringVar(value="tesseract.exe")
+        self.naps2_var = tk.StringVar(value="naps2.console")
+        self.tesseract_var = tk.StringVar(value="tesseract")
         self.lang_var = tk.StringVar(value="deu+eng")
         self.source_var = tk.StringVar(value="adf")
         self.rules_var = tk.StringVar(value="")
