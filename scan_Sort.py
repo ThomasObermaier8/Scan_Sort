@@ -33,9 +33,10 @@ except Exception:  # noqa: BLE001
     ttk = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageStat
 except Exception:  # noqa: BLE001
     Image = None
+    ImageStat = None
 
 
 DEFAULT_RULES: Dict[str, List[str]] = {
@@ -59,7 +60,14 @@ def run_command(cmd: List[str], verbose: bool = False) -> subprocess.CompletedPr
     if verbose:
         print("[CMD]", " ".join(cmd))
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
     except FileNotFoundError as exc:
         binary = cmd[0] if cmd else "<unbekannt>"
         raise RuntimeError(
@@ -190,6 +198,9 @@ def run_scan(
     if source not in source_map:
         raise ValueError(f"Ungültige Quelle: {source}. Erlaubt sind: {', '.join(source_map)}")
     cmd_with_source = cmd + ["--source", source_map[source]]
+    # Bei ADF immer Duplex erzwingen (Vorder- und Rückseite).
+    if source == "adf":
+        cmd_with_source.extend(["--duplex"])
 
     used_cmd = cmd_with_source
     proc = run_command(used_cmd, verbose=verbose)
@@ -198,6 +209,7 @@ def run_scan(
         stdout_lower = proc.stdout.lower()
         unknown_source_flag = (
             ("--source" in proc.stderr)
+            or ("--duplex" in proc.stderr)
             or ("unrecognized option" in stderr_lower)
             or ("unknown option" in stderr_lower)
             or ("unrecognized option" in stdout_lower)
@@ -264,6 +276,42 @@ def auto_orient_pages(
         with Image.open(page) as img:
             rotated = img.rotate(-deg, expand=True)
             rotated.save(page)
+
+
+def is_blank_page(image_path: Path, white_threshold: int = 245, stddev_threshold: float = 10.0) -> bool:
+    """Heuristik für leere/nahezu leere Seiten."""
+    if Image is None or ImageStat is None:
+        return False
+    with Image.open(image_path) as img:
+        gray = img.convert("L")
+        stat = ImageStat.Stat(gray)
+        mean = stat.mean[0]
+        stddev = stat.stddev[0]
+        return mean >= white_threshold and stddev <= stddev_threshold
+
+
+def filter_blank_pages(
+    pages: Iterable[Path],
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[List[Path], int]:
+    """Entfernt leere Seiten aus dem Batch und liefert verbleibende Seiten + Anzahl entfernt."""
+    page_list = list(pages)
+    if Image is None or ImageStat is None:
+        if status_cb:
+            status_cb("Leerseiten-Erkennung übersprungen: Pillow nicht installiert.")
+        return page_list, 0
+
+    kept: List[Path] = []
+    removed = 0
+    for page in page_list:
+        if is_blank_page(page):
+            removed += 1
+            page.unlink(missing_ok=True)
+            if status_cb:
+                status_cb(f"Leere Seite entfernt: {page.name}")
+        else:
+            kept.append(page)
+    return kept, removed
 
 
 def ocr_page(tesseract_path: str, image_path: Path, lang: str, verbose: bool) -> str:
@@ -467,6 +515,12 @@ def process_scan_and_sort(
             verbose=verbose,
             status_cb=status_cb,
         )
+
+    pages, removed_blank = filter_blank_pages(pages=pages, status_cb=status_cb)
+    if status_cb and removed_blank:
+        status_cb(f"Leerseiten entfernt: {removed_blank}")
+    if not pages:
+        raise RuntimeError("Nach dem Entfernen leerer Seiten sind keine Seiten mehr übrig.")
 
     results = sort_pages(
         pages=pages,
