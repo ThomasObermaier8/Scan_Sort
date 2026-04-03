@@ -208,15 +208,16 @@ def run_scan(
     if proc.returncode != 0:
         stderr_lower = proc.stderr.lower()
         stdout_lower = proc.stdout.lower()
-        combined_lower = f"{stderr_lower}\n{stdout_lower}"
         unknown_source_flag = (
-            ("--source" in combined_lower)
-            or ("--duplex" in combined_lower)
-            or ("'duplex' is unknown" in combined_lower)
-            or ("option 'duplex' is unknown" in combined_lower)
-            or ("duplex is unknown" in combined_lower)
-            or ("unrecognized option" in combined_lower)
-            or ("unknown option" in combined_lower)
+            ("--source" in proc.stderr)
+            or ("--duplex" in proc.stderr)
+            or ("'duplex' is unknown" in stdout_lower)
+            or ("option 'duplex' is unknown" in stdout_lower)
+            or ("duplex is unknown" in stdout_lower)
+            or ("unrecognized option" in stderr_lower)
+            or ("unknown option" in stderr_lower)
+            or ("unrecognized option" in stdout_lower)
+            or ("unknown option" in stdout_lower)
         )
         if unknown_source_flag:
             # Fallback für ältere/abweichende NAPS2-Versionen ohne --source-Flag.
