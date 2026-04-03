@@ -27,9 +27,10 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 try:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import filedialog, ttk
 except Exception:  # noqa: BLE001
     tk = None
+    filedialog = None
     ttk = None
 
 try:
@@ -210,6 +211,9 @@ def run_scan(
         unknown_source_flag = (
             ("--source" in proc.stderr)
             or ("--duplex" in proc.stderr)
+            or ("'duplex' is unknown" in stdout_lower)
+            or ("option 'duplex' is unknown" in stdout_lower)
+            or ("duplex is unknown" in stdout_lower)
             or ("unrecognized option" in stderr_lower)
             or ("unknown option" in stderr_lower)
             or ("unrecognized option" in stdout_lower)
@@ -646,23 +650,28 @@ class ScanSortGUI:
         else:
             self.log("Keine NAPS2-Profile gefunden. Bitte zuerst in NAPS2 ein Profil anlegen.")
 
+    def _choose_scan_root(self) -> None:
+        if filedialog is None:
+            self.log("Dateidialog ist nicht verfügbar.")
+            return
+        selected = filedialog.askdirectory(title="Ordner für Rohscans auswählen")
+        if selected:
+            self.scan_root_var.set(selected)
+
+    def _choose_target_root(self) -> None:
+        if filedialog is None:
+            self.log("Dateidialog ist nicht verfügbar.")
+            return
+        selected = filedialog.askdirectory(title="Ordner für sortierte Dateien auswählen")
+        if selected:
+            self.target_root_var.set(selected)
+
     def _build_ui(self) -> None:
         frm = ttk.Frame(self.root, padding=12)
         frm.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frm.columnconfigure(1, weight=1)
-
-        fields = [
-            ("Treiber", self.driver_var),
-            ("Gerät", self.device_var),
-            ("Scan Root", self.scan_root_var),
-            ("Target Root", self.target_root_var),
-            ("NAPS2 Pfad", self.naps2_var),
-            ("Tesseract Pfad", self.tesseract_var),
-            ("Sprache", self.lang_var),
-            ("Rules JSON", self.rules_var),
-        ]
 
         row = 0
         ttk.Label(frm, text="NAPS2 Profil").grid(row=row, column=0, sticky="w", pady=2)
@@ -671,14 +680,19 @@ class ScanSortGUI:
         ttk.Button(frm, text="Profile neu laden", command=self._refresh_profiles).grid(row=row, column=2, sticky="w", padx=(6, 0))
 
         row += 1
-        for label, var in fields:
-            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            ttk.Entry(frm, textvariable=var).grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
-            row += 1
-
         ttk.Label(frm, text="Quelle").grid(row=row, column=0, sticky="w", pady=2)
         src_combo = ttk.Combobox(frm, textvariable=self.source_var, values=["adf", "glasplatte"], state="readonly")
         src_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
+
+        row += 1
+        ttk.Label(frm, text="Scan-Pfad").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=self.scan_root_var).grid(row=row, column=1, sticky="ew", pady=2)
+        ttk.Button(frm, text="Ordner wählen", command=self._choose_scan_root).grid(row=row, column=2, sticky="w", padx=(6, 0))
+
+        row += 1
+        ttk.Label(frm, text="Ziel-Pfad").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=self.target_root_var).grid(row=row, column=1, sticky="ew", pady=2)
+        ttk.Button(frm, text="Ordner wählen", command=self._choose_target_root).grid(row=row, column=2, sticky="w", padx=(6, 0))
 
         row += 1
         ttk.Checkbutton(frm, text="Automatische Ausrichtung", variable=self.auto_orient_var).grid(row=row, column=1, columnspan=2, sticky="w")
