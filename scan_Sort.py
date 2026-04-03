@@ -179,9 +179,9 @@ def run_scan(
     device: str,
     verbose: bool,
 ) -> List[Path]:
-    output_pattern = batch_dir / f"scan_%04d.{image_format}"
+    output_target = batch_dir / f"scan.{image_format}"
 
-    cmd = [naps2_path, "scan", "--output", str(output_pattern)]
+    cmd = [naps2_path, "scan", "--output", str(output_target)]
     if profile.strip():
         cmd.extend(["--profile", profile.strip()])
     else:
@@ -229,9 +229,21 @@ def run_scan(
             f"STDERR: {proc.stderr.strip()}"
         )
 
-    pages = sorted(batch_dir.glob(f"*.{image_format}"))
+    # NAPS2 erzeugt je nach Version/Format evtl. unterschiedliche Dateinamen.
+    scan_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+    pages = sorted(
+        p
+        for p in batch_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in scan_exts
+    )
     if not pages:
-        raise RuntimeError("Keine Bilddateien erzeugt. Prüfe Scanner, Profil und Ausgabeformat.")
+        raise RuntimeError(
+            "Keine Bilddateien erzeugt. Prüfe Scanner, Profil/Treiber und Ausgabeformat.\n"
+            f"Batch-Ordner: {batch_dir}\n"
+            f"Erwartete Ziel-Datei: {output_target}\n"
+            f"STDOUT: {proc.stdout.strip()}\n"
+            f"STDERR: {proc.stderr.strip()}"
+        )
 
     return pages
 
